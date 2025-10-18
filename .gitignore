@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+## good
+.venv/
+.env
+.env.*
+*.sqlite3
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Builds / deps
+dist/
+build/
+*.egg-info/
+# App data
+marketgemini/backend/data/private/
+marketgemini/backend/data/**/tmp/
+*.pem
+*.key
+# Tests
+.pytest_cache/

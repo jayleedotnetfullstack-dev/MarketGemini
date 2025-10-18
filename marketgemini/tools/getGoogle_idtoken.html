@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <body>
+    <div id="g_id_onload"
+         data-client_id="YOUR_CLIENT_ID"
+         data-context="signin"
+         data-ux_mode="popup"
+         data-callback="handleCredentialResponse">
+    </div>
+    <div class="g_id_signin" data-type="standard"></div>
+
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script>
+      function handleCredentialResponse(resp) {
+        // resp.credential is your Google ID token (JWT)
+        console.log("ID TOKEN:", resp.credential);
+        // show it so you can copy
+        const pre = document.createElement('pre');
+        pre.textContent = resp.credential;
+        document.body.appendChild(pre);
+      }
+    </script>
+  </body>
+</html>

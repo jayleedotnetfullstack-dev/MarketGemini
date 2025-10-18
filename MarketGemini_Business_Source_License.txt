@@ -1,0 +1,34 @@
+Business Source License 1.1
+
+Licensor: Jay Lee
+Licensed Work: MarketGemini (AI-Driven Financial Analytics Platform)
+Licensor Copyright Notice: Copyright (c) 2025 Jay Lee. All rights reserved.
+
+License Grant:
+You are granted the right to copy, modify, and use the Licensed Work for
+non-production, non-commercial purposes only (such as evaluation, research,
+education, or personal projects).
+
+Change Date:
+January 1, 2030
+
+Change License:
+On or after the Change Date, the Licensed Work will automatically become
+available under the MIT License.
+
+Additional Use Grant:
+For commercial, production, or revenue-generating uses prior to the Change
+Date, you must obtain a separate commercial license from the Licensor.
+Contact: jay@jaylee.dev
+
+Terms:
+The Licensed Work is provided “AS IS” without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose, and noninfringement. In no event shall the
+Licensor be liable for any claim, damages, or other liability, whether in an
+action of contract, tort, or otherwise, arising from or in connection with the
+Licensed Work or the use or other dealings in the Licensed Work.
+
+Notice Requirement:
+All copies of the Licensed Work must include this License text and the
+Licensor Copyright Notice.
