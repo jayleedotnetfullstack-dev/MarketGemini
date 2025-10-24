@@ -6,6 +6,7 @@ import time
 import json
 import base64
 import typing as t
+from functools import lru_cache
 
 import httpx
 import jwt  # PyJWT
@@ -41,7 +42,7 @@ def make_dev_token(
 
 def verify_bearer(token: str, required_scope: str | None = None) -> dict:
     """
-    Verify an INTERNAL HS256 access token (what your /auth/google/exchange mints).
+    Verify an INTERNAL HS256 access token (what your OIDC exchange/callback mints).
     Enforces issuer/audience/signature/expiry and optional scope.
     """
     try:
@@ -53,11 +54,27 @@ def verify_bearer(token: str, required_scope: str | None = None) -> dict:
             issuer=JWT_ISS,
             options={"require": ["exp", "iss", "aud"]},
         )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid token: exp (expired)"
+        )
+    except jwt.InvalidIssuerError as ex:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"invalid token: issuer mismatch (got={getattr(ex, 'issuer', None)}, want={JWT_ISS})"
+        )
+    except jwt.InvalidAudienceError as ex:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"invalid token: audience mismatch (want={JWT_AUD})"
+        )
     except jwt.PyJWTError as ex:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"invalid token: {ex}",
         )
+
     if required_scope:
         scopes = set((claims.get("scope") or "").split())
         if required_scope not in scopes:
@@ -70,35 +87,62 @@ def verify_bearer(token: str, required_scope: str | None = None) -> dict:
 # =========================
 # Google OIDC (RS256) config
 # =========================
-GOOGLE_ISS      = os.getenv("GOOGLE_ISS", "https://accounts.google.com")
-GOOGLE_JWKS_URI = os.getenv("GOOGLE_JWKS_URI", "https://www.googleapis.com/oauth2/v3/certs")
-GOOGLE_AUD      = os.getenv("GOOGLE_AUDIENCE", "")
+GOOGLE_ISS          = os.getenv("GOOGLE_ISS", "https://accounts.google.com")
+GOOGLE_JWKS_URI     = os.getenv("GOOGLE_JWKS_URI", "https://www.googleapis.com/oauth2/v3/certs")
+GOOGLE_AUD          = os.getenv("GOOGLE_AUDIENCE", "")  # must be your web client_id
 
-def _jwt_header(token: str) -> dict:
+def _b64url_json(segment: str) -> dict:
+    # robust Base64URL decode with correct padding
+    pad = (-len(segment)) % 4
+    segment = segment + ("=" * pad)
     try:
-        h = token.split(".")[0]
-        # pad for base64
-        padded = h + "==="  # safe padding
-        return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        return json.loads(base64.urlsafe_b64decode(segment.encode("ascii")))
     except Exception:
         return {}
+
+def _jwt_header(token: str) -> dict:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+    return _b64url_json(parts[0])
+
+@lru_cache(maxsize=1)
+def _jwks_cache() -> dict:
+    # cached JWKS to avoid network on every call; invalidate by restarting app (fine for dev)
+    with httpx.Client(timeout=10) as client:
+        r = client.get(GOOGLE_JWKS_URI)
+        r.raise_for_status()
+        return r.json()
 
 async def _verify_google_oidc_rs256(token: str) -> dict:
     """
     Verify a raw Google ID token (RS256) using JWKS.
     Validates signature, aud, iss, and standard time claims.
     """
+    if not GOOGLE_AUD:
+        # Misconfiguration: we must know our client_id
+        raise HTTPException(status_code=500, detail="server misconfigured: GOOGLE_AUDIENCE missing")
+
     header = _jwt_header(token)
     kid = header.get("kid")
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        jwks = (await client.get(GOOGLE_JWKS_URI)).json()
-
+    jwks = _jwks_cache()
     key = None
     for k in jwks.get("keys", []):
         if k.get("kid") == kid:
             key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(k))
             break
+    if key is None:
+        # key rotation race; try refetch once
+        try:
+            _jwks_cache.cache_clear()
+            jwks = _jwks_cache()
+            for k in jwks.get("keys", []):
+                if k.get("kid") == kid:
+                    key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(k))
+                    break
+        except Exception:
+            pass
     if key is None:
         raise HTTPException(status_code=401, detail="jwks key not found for kid")
 
@@ -108,21 +152,27 @@ async def _verify_google_oidc_rs256(token: str) -> dict:
             key=key,
             algorithms=["RS256"],
             audience=GOOGLE_AUD,
-            options={"require": ["exp", "aud"]},
+            issuer=GOOGLE_ISS,
+            options={"require": ["exp", "aud", "iss"]},
+            leeway=120,
         )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="invalid google id_token: exp (expired)")
+    except jwt.InvalidAudienceError:
+        raise HTTPException(status_code=401, detail=f"invalid google id_token: audience mismatch (want={GOOGLE_AUD})")
+    except jwt.InvalidIssuerError:
+        raise HTTPException(status_code=401, detail=f"invalid google id_token: issuer mismatch (want={GOOGLE_ISS})")
     except jwt.PyJWTError as ex:
         raise HTTPException(status_code=401, detail=f"invalid google id_token: {ex}")
 
     iss = claims.get("iss")
     if iss not in ("https://accounts.google.com", "accounts.google.com"):
-        raise HTTPException(status_code=401, detail="invalid issuer for google id_token")
+        raise HTTPException(status_code=401, detail="invalid google id_token: iss not Google")
     return claims
 
 # =========================
 # Hybrid verifier for routes
 # =========================
-# app/auth.py (replace your current hybrid + require_scope with this)
-
 async def verify_bearer_hybrid(
     authorization: t.Optional[str] = Header(None),
     required_scope: str | None = None,
@@ -130,11 +180,12 @@ async def verify_bearer_hybrid(
 ) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ", 1)[1]
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
 
     # 1) Try INTERNAL HS256 first
     try:
-        # verify signature/iss/aud/exp (no scope here)
         claims = verify_bearer(token, required_scope=None)
         # scope enforcement for internal tokens
         if required_scope:
@@ -156,12 +207,11 @@ async def verify_bearer_hybrid(
         if required_scope and not allow_raw_google_without_scope:
             raise HTTPException(
                 status_code=403,
-                detail="insufficient_scope (use /auth/google/exchange to obtain scoped access token)",
+                detail="insufficient_scope (use /auth/google/exchange or /auth/callback to obtain scoped access token)",
             )
         return claims
 
-
-def require_scope(required: str, *, allow_raw_google_without_scope: bool = False):
+def require_scope(required: str | None, *, allow_raw_google_without_scope: bool = False):
     async def dep(authorization: t.Optional[str] = Header(None)):
         return await verify_bearer_hybrid(
             authorization=authorization,
@@ -169,5 +219,3 @@ def require_scope(required: str, *, allow_raw_google_without_scope: bool = False
             allow_raw_google_without_scope=allow_raw_google_without_scope,
         )
     return dep
-
-
