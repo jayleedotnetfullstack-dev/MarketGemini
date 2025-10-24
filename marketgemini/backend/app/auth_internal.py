@@ -1,7 +1,7 @@
 import os, time, jwt
 from typing import Optional, Dict, Any
 
-JWT_SECRET = os.getenv("JWT_SECRET", "dev_change_me")
+JWT_SECRET = os.getenv("JWT_SECRET", "dev_secret_do_not_use_in_prod")
 JWT_ISS    = os.getenv("JWT_ISS", "marketgemini")
 JWT_AUD    = os.getenv("JWT_AUD", "marketgemini-api")
 
