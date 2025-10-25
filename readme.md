@@ -22,7 +22,6 @@ It ingests live and historical data, cleans and normalizes it, computes advanced
 ```
 Ingestion & Normalization ─▶ Feature & Indicator Engine ─▶ 
 Regime Detection ─▶ Forecasting ─▶ Publish Layer (API / Dashboard)
-
 ```
 
 | Layer | Description | Tech |
