@@ -195,4 +195,4 @@ MIT License © 2025 Jay Lee
 **Location:** Seattle, WA  
 **Email:** jaylee.dotnetfullstack@jaylee.dev  
 **LinkedIn:** [linkedin.com/in/jaylee-dev](https://www.linkedin.com/in/jay-lee-489b11/)  
-**GitHub:** [github.com/jayleedotnetfullstack-dev](https://github.com/jayleedotnetfullstack-dev)
+**GitHub:** [github.com/jayleedotnetfullstack-dev]()https://github.com/jayleedotnetfullstack-dev

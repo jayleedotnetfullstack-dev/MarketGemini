@@ -3,6 +3,7 @@ import os
 from fastapi import FastAPI, Depends, Request
 from fastapi.openapi.utils import get_openapi
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
 # Load .env before any auth modules read environment variables
 load_dotenv()
@@ -13,6 +14,18 @@ setup_logging()
 from .security.base import auth_required  # selector (HS256 dev vs internal in OIDC)
 
 app = FastAPI(title="MarketGemini API", version="0.4.0")
+
+origins_csv = os.getenv("CORS_ALLOW_ORIGINS", "")
+if origins_csv:
+    ALLOWED_ORIGINS = [o.strip() for o in origins_csv.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,           # only if you use cookies/auth across origins
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],              # or specify: ["Authorization", "Content-Type"]
+)
 
 AUTH_MODE = (os.getenv("AUTH_MODE", "HS256") or "").strip().upper()
 
@@ -52,6 +65,9 @@ def auth_me(_claims = Depends(auth_required(None))):  # None => just validate; n
     return _claims
 
 # 2) Series and analysis routes
+from marketgemini_backend.app.api.routes.anomaly import router as anomaly_router
+app.include_router(anomaly_router)
+
 try:
     from .api.routes.series import router as series_router
     app.include_router(series_router)

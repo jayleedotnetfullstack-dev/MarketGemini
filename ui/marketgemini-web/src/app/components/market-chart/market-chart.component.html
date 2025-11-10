@@ -1,0 +1,33 @@
+<!-- src/app/components/market-chart/market-chart.component.html -->
+<div class="toolbar">
+  <label>Asset:
+    <input [(ngModel)]="asset" placeholder="GOLD" autocomplete="off" />
+  </label>
+
+  <span class="toggles">
+    <label><input type="checkbox" [(ngModel)]="showSMA50" /> SMA 50</label>
+    <label><input type="checkbox" [(ngModel)]="showSMA200" /> SMA 200</label>
+    <label><input type="checkbox" [(ngModel)]="showAnomalies" /> Anomalies</label>
+  </span>
+
+  <button (click)="load()" [disabled]="loading">Reload</button>
+</div>
+
+<div class="auth">
+  <input
+    #tk
+    type="password"
+    placeholder="Paste internal Bearer token"
+    (keyup.enter)="saveToken(tk.value)"
+    autocomplete="off"
+  />
+  <button (click)="saveToken(tk.value)">Save Token</button>
+</div>
+
+<div *ngIf="error" class="error">{{ error }}</div>
+<pre *ngIf="errorDetail" class="error" style="white-space: pre-wrap">{{ errorDetail }}</pre>
+
+
+<!-- Ensure your SCSS sets .chart height, e.g., .chart { height: 480px; } -->
+<div *ngIf="chartInit" echarts [options]="chartOptions" class="chart"></div>
+<div *ngIf="loading" class="loading">Loading…</div>
