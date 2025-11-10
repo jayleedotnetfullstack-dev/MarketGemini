@@ -1,4 +1,3 @@
-# src/marketgemini_backend/app/auth/internal.py
 from __future__ import annotations
 
 import os

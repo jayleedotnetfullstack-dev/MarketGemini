@@ -1,0 +1,74 @@
+/* Top Toolbar (SMA toggles + Reload) */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+
+  label {
+    font-weight: 500;
+  }
+
+  input[type="text"] {
+    width: 100px;
+    padding: 4px 6px;
+  }
+
+  .toggles {
+    display: flex;
+    gap: 12px;
+
+    label {
+      font-weight: normal;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+    }
+  }
+
+  button {
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+}
+
+/* Token Input Section */
+.auth {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+
+  input {
+    width: 420px;
+    padding: 4px 6px;
+  }
+
+  button {
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+}
+
+/* Error + Loading styles */
+.error {
+  color: #e74c3c;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.loading {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Chart container */
+.chart {
+  height: 520px;
+  width: 100%;
+  border: 1px solid #333;
+  background: #111;
+  border-radius: 6px;
+}
