@@ -1,0 +1,59 @@
+providers:
+  gemini:
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.5-flash
+    api_key_env: GEMINI_API_KEY
+    cost_in: 0.10
+    cost_out: 0.40
+
+  openai:
+    enabled: false
+    base_url: https://api.openai.com/v1
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+    cost_in: 0.15
+    cost_out: 0.60
+
+  deepseek:
+    enabled: false
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-chat
+    api_key_env: DEEPSEEK_API_KEY
+    cost_in: 0.14
+    cost_out: 0.28
+
+routing:
+  # epsilon = exploration chance
+  epsilon: 0.10
+
+  # Router target model distribution
+  target_share:
+    gemini: 1.0
+    openai: 0.0
+    deepseek: 0.0
+
+profiles:
+  # Low creativity, high factual accuracy
+  factual:
+    temperature: 0.1
+    top_p: 0.9
+
+  # Code generation should be deterministic
+  code:
+    temperature: 0.0
+    top_p: 1.0
+
+  # Good for summaries, stable, short answers
+  summary:
+    temperature: 0.2
+    top_p: 1.0
+
+  # Rewrite / creative tasks
+  rewrite:
+    temperature: 0.5
+    top_p: 0.9
+
+clamps:
+  temperature: [0.0, 1.3]
+  top_p: [0.5, 1.0]

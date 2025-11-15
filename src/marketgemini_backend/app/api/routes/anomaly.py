@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from fastapi import APIRouter, Query, HTTPException, Depends
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,7 @@ router = APIRouter(
 )
 
 # ---------- Models ----------
+
 class AnomalyRequest(BaseModel):
     values: List[float] = Field(..., description="Time-series values to analyze.")
     window: int = Field(30, ge=1, description="Window length for robust z-score.")
@@ -30,12 +31,12 @@ class AnomalyResult(BaseModel):
 
 # ---------- Endpoints ----------
 
-@router.get("", response_model=AnomalyResult)
+@router.get("/anomaly", response_model=AnomalyResult)
 async def anomaly_for_asset(
     asset: str = Query(..., description="Asset symbol (MVP: GOLD only)"),
     window: int = Query(30, ge=1, description="Window length for robust z-score."),
     threshold: float = Query(3.5, gt=0, description="Z-score threshold for anomalies."),
-    _claims = Depends(auth_required("series:read")),   # read rights are enough if we supply the values
+    _claims = Depends(auth_required("series:read")),
 ) -> Dict[str, Any]:
     """
     Compute anomalies for a known asset using server-side series.
@@ -46,7 +47,6 @@ async def anomaly_for_asset(
     series, _meta = load_series("gold")
     values = [float(v) for _, v in series]
     out = robust_zscore(values, window=window, threshold=threshold)
-    # normalize keys for API
     return {
         "window": window,
         "threshold": threshold,
@@ -55,10 +55,10 @@ async def anomaly_for_asset(
     }
 
 
-@router.post("", response_model=AnomalyResult)
+@router.post("/anomaly", response_model=AnomalyResult)
 async def anomaly_for_payload(
     req: AnomalyRequest,
-    _claims = Depends(auth_required("analyze:run")),   # stricter: you’re posting data for analysis
+    _claims = Depends(auth_required("analyze:run")),
 ) -> Dict[str, Any]:
     """
     Compute anomalies from posted values.
