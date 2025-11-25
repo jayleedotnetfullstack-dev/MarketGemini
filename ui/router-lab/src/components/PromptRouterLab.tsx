@@ -1,38 +1,52 @@
+// src/components/PromptRouterLab.tsx
+
 import React, { useState } from "react";
+import {
+  DigestResult,
+  RouterChatResponse,
+  Provider,
+  ProviderOption,
+  ConsolidateConfig,
+  ProfileId,
+} from "./RouterTypes";
+import { PROVIDER_CONFIG } from "./ProviderConfig";
+import ProviderSelector from "./ProviderSelector";
+import ConsolidationSelector from "./ConsolidationSelector";
+import DigestSummary from "./DigestSummary";
+import ChatResponse from "./ChatResponse";
+import DebugPanel from "./DebugPanel";
 
-const ROUTER_BASE_URL =
-  import.meta.env.VITE_ROUTER_BASE_URL || "http://localhost:8081";
-
-interface DigestResult {
-  intent: string;
-  profile: string;
-  confidence: number;
-  cleaned_prompt: string;
-  suggestions: string[];
-}
-
-interface ChatResult {
-  provider: string;
-  model: string;
-  mode: string;
-  content: string;
-  tokens_in: number;
-  tokens_out: number;
-  latency_ms: number;
-  cost_usd: number;
-  profile?: string;
-}
+const ROUTER_BASE_URL = "http://localhost:8000";
 
 const PromptRouterLab: React.FC = () => {
   const [prompt, setPrompt] = useState("");
   const [digest, setDigest] = useState<DigestResult | null>(null);
   const [digestRaw, setDigestRaw] = useState<any | null>(null);
-  const [chatResult, setChatResult] = useState<ChatResult | null>(null);
+  const [routerResponse, setRouterResponse] =
+    useState<RouterChatResponse | null>(null);
   const [chatRaw, setChatRaw] = useState<any | null>(null);
 
   const [loadingDigest, setLoadingDigest] = useState(false);
   const [loadingChat, setLoadingChat] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Toggle: show individual model outputs vs just final consolidated result
+  const [showProviderDetails, setShowProviderDetails] = useState<boolean>(false);
+
+  const enabledProviderOptions: ProviderOption[] = PROVIDER_CONFIG
+    .filter((p) => p.enabled)
+    .map((p) => ({ provider: p.provider, label: p.label }));
+
+  // Default: Gemini only (you can multi-select in ProviderSelector)
+  const [providers, setProviders] = useState<Provider[]>(["gemini"]);
+
+  const [consolidateConfig, setConsolidateConfig] = useState<ConsolidateConfig>(
+    {
+      enabled: true,
+      provider: "gemini",
+      model: "gemini-3.0-flash",
+    }
+  );
 
   // --- Handlers ---
 
@@ -40,7 +54,7 @@ const PromptRouterLab: React.FC = () => {
     setError(null);
     setDigest(null);
     setDigestRaw(null);
-    setChatResult(null);
+    setRouterResponse(null);
     setChatRaw(null);
 
     if (!prompt.trim()) {
@@ -51,7 +65,7 @@ const PromptRouterLab: React.FC = () => {
     setLoadingDigest(true);
     try {
       const body = {
-        user_id: "router-lab", // demo user; in real app this comes from auth
+        user_id: "router-lab",
         session_id: "router-lab-session-1",
         messages: [
           {
@@ -77,9 +91,11 @@ const PromptRouterLab: React.FC = () => {
         return;
       }
 
+      const profile: ProfileId = (data.profile as ProfileId) ?? "summary";
+
       const parsed: DigestResult = {
         intent: data.intent ?? "unknown",
-        profile: data.profile ?? "summary",
+        profile,
         confidence: typeof data.confidence === "number" ? data.confidence : 0.0,
         cleaned_prompt: data.cleaned_prompt ?? prompt,
         suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
@@ -98,10 +114,9 @@ const PromptRouterLab: React.FC = () => {
   const handleRunChat = async () => {
     setError(null);
     setLoadingChat(true);
-    setChatResult(null);
+    setRouterResponse(null);
     setChatRaw(null);
 
-    // Use cleaned prompt if we have it; otherwise original
     const finalPrompt = digest?.cleaned_prompt?.trim() || prompt.trim();
     if (!finalPrompt) {
       setError("No prompt to send. Please analyze first or enter a prompt.");
@@ -109,20 +124,35 @@ const PromptRouterLab: React.FC = () => {
       return;
     }
 
+    if (providers.length === 0) {
+      setError("Please select at least one provider.");
+      setLoadingChat(false);
+      return;
+    }
+
+    const profile: ProfileId = digest?.profile ?? "summary";
+
     try {
       const body = {
+        // user_id will eventually come from auth; for now demo
         user_id: "router-lab",
         session_id: "router-lab-session-1",
-        profile: digest?.profile ?? "summary",
+        profile,
+        providers, // multiple providers supported
         messages: [
           {
             role: "user",
             content: finalPrompt,
           },
         ],
+        consolidate: {
+          enabled: consolidateConfig.enabled,
+          provider: consolidateConfig.provider,
+          model: consolidateConfig.model,
+        },
       };
 
-      const resp = await fetch(`${ROUTER_BASE_URL}/v1/chat`, {
+      const resp = await fetch(`${ROUTER_BASE_URL}/v1/router/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -138,19 +168,8 @@ const PromptRouterLab: React.FC = () => {
         return;
       }
 
-      const parsed: ChatResult = {
-        provider: data.provider ?? "router",
-        model: data.model ?? "n/a",
-        mode: data.mode ?? "UNKNOWN",
-        content: data.content ?? "",
-        tokens_in: data.tokens_in ?? 0,
-        tokens_out: data.tokens_out ?? 0,
-        latency_ms: data.latency_ms ?? 0,
-        cost_usd: data.cost_usd ?? 0,
-        profile: data.profile,
-      };
-
-      setChatResult(parsed);
+      // trust backend to match RouterChatResponse shape
+      setRouterResponse(data as RouterChatResponse);
     } catch (e: any) {
       console.error("Chat error:", e);
       setError(e.message || "Chat error");
@@ -158,20 +177,6 @@ const PromptRouterLab: React.FC = () => {
     } finally {
       setLoadingChat(false);
     }
-  };
-
-  // --- Render helpers ---
-
-  const confidenceLabel = (c: number) => {
-    if (c >= 0.8) return "High";
-    if (c >= 0.5) return "Medium";
-    return "Low";
-  };
-
-  const confidenceColor = (c: number) => {
-    if (c >= 0.8) return "#16a34a"; // green
-    if (c >= 0.5) return "#facc15"; // yellow
-    return "#ef4444"; // red
   };
 
   // --- UI ---
@@ -183,7 +188,8 @@ const PromptRouterLab: React.FC = () => {
         backgroundColor: "#020617",
         color: "#e5e7eb",
         padding: "24px",
-        fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        fontFamily:
+          "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       }}
     >
       <div
@@ -195,15 +201,80 @@ const PromptRouterLab: React.FC = () => {
           gap: "24px",
         }}
       >
-        {/* Left column: Prompt + digest + chat */}
+        {/* Left column */}
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <h1 style={{ fontSize: "24px", fontWeight: 700 }}>
             Prompt Router Lab
           </h1>
           <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-            Analyze a prompt, auto-select a profile, then run it end-to-end
-            through your router (Gemini / others) with debug info.
+            Analyze a prompt, auto-select a profile, then run it through one or
+            more providers (Gemini / ChatGPT / DeepSeek), with optional
+            consolidation.
           </p>
+
+          {/* Provider selector & consolidation */}
+          <div
+            style={{
+              padding: "12px",
+              borderRadius: "12px",
+              border: "1px solid #1f2937",
+              backgroundColor: "#020617",
+            }}
+          >
+            <label
+              style={{
+                fontSize: "13px",
+                fontWeight: 600,
+                color: "#9ca3af",
+                display: "block",
+                marginBottom: "4px",
+              }}
+            >
+              Providers
+            </label>
+            <ProviderSelector
+              selected={providers}
+              onChange={setProviders}
+              options={enabledProviderOptions}
+            />
+
+            <div style={{ marginTop: "8px" }}>
+              <ConsolidationSelector
+                value={consolidateConfig}
+                onChange={setConsolidateConfig}
+              />
+            </div>
+
+            {/* Toggle per-provider debugging view */}
+            <div
+              style={{
+                marginTop: "8px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                fontSize: "12px",
+                color: "#9ca3af",
+              }}
+            >
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={showProviderDetails}
+                  onChange={(e) =>
+                    setShowProviderDetails(e.target.checked)
+                  }
+                />
+                Show per-provider responses (debug)
+              </label>
+            </div>
+          </div>
 
           {/* Prompt input */}
           <div
@@ -257,8 +328,7 @@ const PromptRouterLab: React.FC = () => {
                   padding: "6px 12px",
                   borderRadius: "999px",
                   border: "none",
-                  background:
-                    "linear-gradient(to right, #06b6d4, #6366f1)",
+                  background: "linear-gradient(to right, #06b6d4, #6366f1)",
                   color: "#0f172a",
                   fontWeight: 600,
                   fontSize: "13px",
@@ -306,232 +376,19 @@ const PromptRouterLab: React.FC = () => {
           )}
 
           {/* Digest summary */}
-          <div
-            style={{
-              backgroundColor: "#020617",
-              borderRadius: "12px",
-              border: "1px solid #1f2937",
-              padding: "12px",
-              minHeight: "80px",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: "6px",
-              }}
-            >
-              <h2
-                style={{
-                  fontSize: "14px",
-                  fontWeight: 600,
-                  color: "#e5e7eb",
-                }}
-              >
-                Digest summary
-              </h2>
-              {digest && (
-                <span
-                  style={{
-                    fontSize: "12px",
-                    padding: "2px 8px",
-                    borderRadius: "999px",
-                    border: "1px solid #374151",
-                    color: confidenceColor(digest.confidence),
-                  }}
-                >
-                  Confidence: {confidenceLabel(digest.confidence)} (
-                  {digest.confidence.toFixed(2)})
-                </span>
-              )}
-            </div>
+          <DigestSummary digest={digest} />
 
-            {!digest && (
-              <p style={{ fontSize: "13px", color: "#6b7280" }}>
-                Run <strong>Analyze / Digest</strong> to see intent, profile,
-                and suggestions.
-              </p>
-            )}
-
-            {digest && (
-              <div style={{ fontSize: "13px", color: "#d1d5db" }}>
-                <div style={{ marginBottom: "4px" }}>
-                  <strong>Intent:</strong> {digest.intent}
-                </div>
-                <div style={{ marginBottom: "4px" }}>
-                  <strong>Profile:</strong> {digest.profile}
-                </div>
-                <div style={{ marginBottom: "4px" }}>
-                  <strong>Cleaned prompt:</strong>{" "}
-                  <span style={{ color: "#e5e7eb" }}>
-                    {digest.cleaned_prompt}
-                  </span>
-                </div>
-                {digest.suggestions.length > 0 && (
-                  <div style={{ marginTop: "6px" }}>
-                    <strong>Suggestions:</strong>
-                    <ul style={{ marginTop: "4px", paddingLeft: "18px" }}>
-                      {digest.suggestions.map((s, idx) => (
-                        <li key={idx} style={{ color: "#9ca3af" }}>
-                          {s}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Chat response */}
-          <div
-            style={{
-              backgroundColor: "#020617",
-              borderRadius: "12px",
-              border: "1px solid #1f2937",
-              padding: "12px",
-              minHeight: "80px",
-            }}
-          >
-            <h2
-              style={{
-                fontSize: "14px",
-                fontWeight: 600,
-                color: "#e5e7eb",
-                marginBottom: "6px",
-              }}
-            >
-              LLM Response
-            </h2>
-
-            {!chatResult && (
-              <p style={{ fontSize: "13px", color: "#6b7280" }}>
-                After digest, click{" "}
-                <strong>Run with cleaned prompt</strong> to call{" "}
-                <code>/v1/chat</code>.
-              </p>
-            )}
-
-            {chatResult && (
-              <>
-                <div
-                  style={{
-                    fontSize: "12px",
-                    color: "#9ca3af",
-                    marginBottom: "6px",
-                  }}
-                >
-                  <span>
-                    Provider: <strong>{chatResult.provider}</strong>
-                  </span>
-                  {" · "}
-                  <span>
-                    Model: <strong>{chatResult.model}</strong>
-                  </span>
-                  {" · "}
-                  <span>
-                    Profile: <strong>{chatResult.profile ?? "n/a"}</strong>
-                  </span>
-                  {" · "}
-                  <span>
-                    Cost: ${chatResult.cost_usd.toFixed(4)} ·{" "}
-                    {chatResult.tokens_in} → {chatResult.tokens_out} tokens ·{" "}
-                    {chatResult.latency_ms} ms
-                  </span>
-                </div>
-                <div
-                  style={{
-                    borderRadius: "8px",
-                    border: "1px solid #374151",
-                    padding: "10px",
-                    backgroundColor: "#020617",
-                    whiteSpace: "pre-wrap",
-                    fontSize: "13px",
-                    color: "#e5e7eb",
-                    maxHeight: "260px",      // 👈 limit height
-                    overflowY: "auto",       // 👈 show vertical scroll bar if needed
-                  }}
-                >
-                  {chatResult.content}
-                </div>
-              </>
-            )}
-          </div>
+          {/* Final + (optional) per-provider responses */}
+          <ChatResponse
+            routerResponse={routerResponse}
+            showProviderDetails={showProviderDetails}
+          />
         </div>
 
         {/* Right column: raw debug */}
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <div
-            style={{
-              backgroundColor: "#020617",
-              borderRadius: "12px",
-              border: "1px solid #1f2937",
-              padding: "12px",
-            }}
-          >
-            <h2
-              style={{
-                fontSize: "14px",
-                fontWeight: 600,
-                color: "#e5e7eb",
-                marginBottom: "6px",
-              }}
-            >
-              Digest raw
-            </h2>
-            <pre
-              style={{
-                fontSize: "11px",
-                backgroundColor: "#020617",
-                color: "#9ca3af",
-                borderRadius: "8px",
-                padding: "8px",
-                border: "1px solid #111827",
-                maxHeight: "260px",
-                overflow: "auto",
-              }}
-            >
-              {digestRaw
-                ? JSON.stringify(digestRaw, null, 2)
-                : "<no digest yet>"}
-            </pre>
-          </div>
-
-          <div
-            style={{
-              backgroundColor: "#020617",
-              borderRadius: "12px",
-              border: "1px solid #1f2937",
-              padding: "12px",
-            }}
-          >
-            <h2
-              style={{
-                fontSize: "14px",
-                fontWeight: 600,
-                color: "#e5e7eb",
-                marginBottom: "6px",
-              }}
-            >
-              Chat raw
-            </h2>
-            <pre
-              style={{
-                fontSize: "11px",
-                backgroundColor: "#020617",
-                color: "#9ca3af",
-                borderRadius: "8px",
-                padding: "8px",
-                border: "1px solid #111827",
-                maxHeight: "260px",
-                overflow: "auto",
-              }}
-            >
-              {chatRaw ? JSON.stringify(chatRaw, null, 2) : "<no chat yet>"}
-            </pre>
-          </div>
+          <DebugPanel title="Digest raw" data={digestRaw} />
+          <DebugPanel title="Router chat raw" data={chatRaw} />
         </div>
       </div>
     </div>
