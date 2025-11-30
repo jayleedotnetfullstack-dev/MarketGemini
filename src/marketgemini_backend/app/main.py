@@ -13,7 +13,12 @@ setup_logging()
 
 from .security.base import auth_required  # selector (HS256 dev vs internal in OIDC)
 
-app = FastAPI(title="MarketGemini API", version="0.4.0")
+from marketgemini_backend.app.auth.google import router as google_auth_router
+
+
+app = FastAPI(title="MarketGemini API (DEBUG MAIN.PY)", version="0.4.0")
+
+app.include_router(google_auth_router)
 
 origins_csv = os.getenv("CORS_ALLOW_ORIGINS", "")
 if origins_csv:

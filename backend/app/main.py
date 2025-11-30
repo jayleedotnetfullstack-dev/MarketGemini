@@ -4,7 +4,7 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
-from .db import get_db, test_connection
+from .db.session import get_db, test_connection
 from .router_chat import router as router_chat_router
 
 app = FastAPI(title="MarketGemini Router API")

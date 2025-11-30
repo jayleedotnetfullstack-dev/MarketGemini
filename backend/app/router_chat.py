@@ -1,40 +1,31 @@
-import uuid
-import time
-import asyncio
-import os
-import random
-from typing import List, Optional, Literal, Any
+# backend/app/router_chat.py
+import logging
+from typing import Any, Dict, List, Literal, Optional
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-
-from .schemas import (
-    RouterChatRequest,
-    RouterChatResponse,
-    RouterResultItem,
-    FinalResult,
-    Provider,
+from app.schemas.core import RouterChatRequest, RouterChatResponse
+from app.db.session import get_db
+from app.services.session_service import (
+    get_current_user,
+    get_or_create_session,
+    get_or_create_user_from_identity,
+    UserIdentityInfo,
 )
+from app.services.call_service import call_providers
 
-from .db import get_db
-from .models import User, Session, AiRouterRequest, AiInvocation
-
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# ============================================================
-#  /v1/digest  (used by Analyze / Digest button in the UI)
-# ============================================================
-
-Role = Literal["user", "assistant", "system"]
+# ---------------------------------------------------------
+# /v1/router/digest  – simple intent classifier stub
+# ---------------------------------------------------------
 
 
 class DigestMessage(BaseModel):
-    role: Role
+    role: Literal["user", "assistant", "system"]
     content: str
 
 
@@ -46,428 +37,312 @@ class DigestRequest(BaseModel):
 
 class DigestResponse(BaseModel):
     intent: str
-    profile: str
-    confidence: float
-    cleaned_prompt: str
-    suggestions: List[str]
 
 
-@router.post("/v1/digest", response_model=DigestResponse)
-async def digest(req: DigestRequest) -> DigestResponse:
+class WhoAmIResponse(BaseModel):
+    user_id: str
+    external_id: str
+    display_name: str
+    email: Optional[str] = None
+    primary_identity: Optional[Dict[str, Any]] = None
+
+
+@router.get("/v1/auth/whoami", response_model=WhoAmIResponse)
+async def whoami() -> WhoAmIResponse:
     """
-    Heuristic digest:
-    - Computes confidence based on prompt length / richness
-    - Returns suggestions when the prompt is too short or too long
+    Debug endpoint: shows which internal User + primary identity
+    the backend is using for the current request.
+
+    For now this uses the dev identity stub (provider='local', provider_sub='dev-user-1').
+    Later, the stub will be replaced by real Google/Apple/MSFT/DeepSeek login.
     """
-    raw = _extract_prompt_from_messages(req.messages)
-    text = (raw or "").strip()
-    words = text.split()
-    word_count = len(words)
-    char_len = len(text)
+    from sqlalchemy import select
+    from app.db.models import UserIdentity
 
-    intent = "general_question"
-    profile = "summary"
-    confidence = 0.85
-    suggestions: List[str] = []
-
-    # Very vague: "why?", "help", "?", etc.
-    if char_len < 5 or word_count <= 1:
-        intent = "too_vague"
-        confidence = 0.20
-        suggestions.append(
-            "Your prompt is too short. Please add what topic or situation you're asking about."
-        )
-        suggestions.append(
-            "Example: instead of 'why?', try 'Why did gold prices rise in 2024?'"
-        )
-
-    # Short / low-context: "why gold?", "explain inflation"
-    elif word_count < 5:
-        intent = "vague"
-        confidence = 0.45
-        suggestions.append(
-            "Try adding a bit more context (who/what/when) so the answer can be more precise."
-        )
-        suggestions.append(
-            "Example: 'Explain how inflation affects long-term mortgage rates in the US.'"
-        )
-
-    # Very long / rambling
-    elif word_count > 40:
-        intent = "long_question"
-        confidence = 0.70
-        suggestions.append(
-            "Your question is quite long. Consider summarizing the key points to get a sharper answer."
-        )
-
-    # Normal, well-sized question
-    else:
-        intent = "well_formed"
-        confidence = 0.90
-
-    return DigestResponse(
-        intent=intent,
-        profile=profile,
-        confidence=confidence,
-        cleaned_prompt=text or raw,
-        suggestions=suggestions,
-    )
-
-
-# ============================================================
-#  Helpers for router_chat
-# ============================================================
-
-async def get_current_user(db: AsyncSession = Depends(get_db)) -> User:
-    stmt = select(User).where(User.external_id == "router-lab")
-    result = await db.execute(stmt)
-    user = result.scalar_one_or_none()
-    if not user:
-        user = User(
-            external_id="router-lab",
-            display_name="Router Lab",
-            email=None,
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-    return user
-
-
-async def get_or_create_session(
-    db: AsyncSession,
-    user_id,
-    session_id_str: str,
-) -> Session:
+    # 1) Get DB session (same pattern as router_chat)
+    db = None
     try:
-        session_uuid = uuid.UUID(session_id_str)
-    except ValueError:
-        session_uuid = uuid.uuid4()
+        async for db_session in get_db():
+            db = db_session
+            break
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"db_error: {exc!r}")
 
-    stmt = select(Session).where(Session.id == session_uuid)
-    result = await db.execute(stmt)
-    sess = result.scalar_one_or_none()
-    if sess:
-        return sess
+    if db is None:
+        raise HTTPException(status_code=500, detail="db_not_available")
 
-    sess = Session(
-        id=session_uuid,
-        user_id=user_id,
-        title="Router Lab Session",
-    )
-    db.add(sess)
-    await db.commit()
-    await db.refresh(sess)
-    return sess
-
-
-async def log_invocation(
-    db: AsyncSession,
-    *,
-    user_id,
-    session_id,
-    router_request_id,
-    provider: Provider,
-    model: str,
-    profile: str,
-    confidence: Optional[float],
-    tokens_in: int,
-    tokens_out: int,
-    cost_usd: float,
-    latency_ms: int,
-    success: bool,
-    error_code: Optional[str],
-) -> None:
-    inv = AiInvocation(
-        user_id=user_id,
-        session_id=session_id,
-        router_request_id=router_request_id,
-        provider=provider,
-        model=model,
-        profile=profile,
-        confidence=confidence,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        tokens_total=(tokens_in or 0) + (tokens_out or 0),
-        cost_usd=cost_usd,
-        latency_ms=latency_ms,
-        success=success,
-        error_code=error_code,
-    )
-    db.add(inv)
-    await db.commit()
-
-
-# ============================================================
-#  Gemini provider helper
-# ============================================================
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL_DEFAULT = os.getenv("GEMINI_MODEL_DEFAULT", "gemini-2.0-flash")
-
-
-def _extract_prompt_from_messages(messages: List[Any]) -> str:
-    """Support both Pydantic objects and plain dicts for messages."""
-    if not messages:
-        return ""
-    last = messages[-1]
-    if hasattr(last, "content"):
-        return last.content
-    if isinstance(last, dict) and "content" in last:
-        return str(last["content"])
-    return str(last)
-
-
-async def call_gemini_api(
-    messages: List[Any],
-    model_hint: Optional[str],
-) -> tuple[str, int, int, str]:
-    """
-    Gemini API call with exponential backoff retry handling.
-    Returns: (content, tokens_in, tokens_out, model_used)
-    """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set in environment")
-
-    prompt = _extract_prompt_from_messages(messages)
-    model = model_hint or GEMINI_MODEL_DEFAULT
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={GEMINI_API_KEY}"
-    )
-
-    payload = {
-        "contents": [
-            {"role": "user", "parts": [{"text": prompt}]}
-        ]
-    }
-
-    max_attempts = 5
-    backoff = 1.0  # seconds
-
-    for attempt in range(max_attempts):
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=payload)
-
-            # Handle rate limiting or transient errors with retry
-            if resp.status_code in (429, 503) and attempt < max_attempts - 1:
-                await asyncio.sleep(backoff + random.random())
-                backoff *= 2
-                continue
-
-            resp.raise_for_status()
-            data = resp.json()
-
-            candidates = data.get("candidates") or []
-            if not candidates:
-                raise RuntimeError("Gemini returned no candidates")
-
-            parts = candidates[0].get("content", {}).get("parts") or []
-            if not parts:
-                raise RuntimeError("Gemini returned empty content parts")
-
-            content = parts[0].get("text", "")
-
-            usage = data.get("usageMetadata") or {}
-            tokens_in = usage.get("promptTokenCount", 0)
-            tokens_out = usage.get("candidatesTokenCount", 0)
-
-            return content, tokens_in, tokens_out, model
-
-        except httpx.HTTPStatusError as e:
-            # Retry only for 429 / 503 when attempts remain
-            if (
-                e.response is not None
-                and e.response.status_code in (429, 503)
-                and attempt < max_attempts - 1
-            ):
-                await asyncio.sleep(backoff + random.random())
-                backoff *= 2
-                continue
-            raise
-        except httpx.RequestError:
-            # Network-level error; optionally retry as well
-            if attempt < max_attempts - 1:
-                await asyncio.sleep(backoff + random.random())
-                backoff *= 2
-                continue
-            raise
-
-    raise RuntimeError("Gemini failed after retries")
-
-
-# ============================================================
-#  Single-provider call (Gemini + future others)
-# ============================================================
-
-async def call_single_provider(
-    db: AsyncSession,
-    *,
-    user_id,
-    session_id,
-    router_request_id,
-    provider: Provider,
-    model_hint: Optional[str],
-    profile: str,
-    messages,
-) -> RouterResultItem:
-
-    start = time.perf_counter()
-    success = True
-    error_code = None
-
-    # Defaults for unimplemented providers or failure
-    tokens_in = 0
-    tokens_out = 0
-    cost_usd = 0.0
-    confidence = 0.80
-    content = f"[DEMO] {provider} ({profile}) would answer here."
-    model_used = model_hint or f"{provider}-demo-model"
-
+    # 2) Resolve current user via identity mapping
     try:
-        if provider == "gemini":
-            # Real Gemini call
-            content, tokens_in, tokens_out, model_used = await call_gemini_api(
-                messages=messages,
-                model_hint=model_hint,
-            )
-            # You can refine these based on actual pricing
-            cost_usd = 0.0
-            confidence = 0.88
+        user = await get_current_user(db=db)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"get_current_user_error: {exc!r}")
 
-        else:
-            # TODO: implement real calls for chatgpt / deepseek
-            pass
-
-    except Exception as ex:
-        success = False
-        error_code = type(ex).__name__
-        content = f"Error from {provider}: {ex}"
-
-    latency_ms = int((time.perf_counter() - start) * 1000)
-
-    await log_invocation(
-        db,
-        user_id=user_id,
-        session_id=session_id,
-        router_request_id=router_request_id,
-        provider=provider,
-        model=model_used,
-        profile=profile,
-        confidence=confidence,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        cost_usd=cost_usd,
-        latency_ms=latency_ms,
-        success=success,
-        error_code=error_code,
+    # 3) Load one identity row explicitly (no lazy relationship to avoid MissingGreenlet)
+    ident_stmt = (
+        select(UserIdentity)
+        .where(UserIdentity.user_id == user.id)
+        .order_by(UserIdentity.created_at.asc())
+        .limit(1)
     )
+    ident_result = await db.execute(ident_stmt)
+    ui = ident_result.scalar_one_or_none()
 
-    return RouterResultItem(
-        provider=provider,
-        model=model_used,
-        profile=profile,
-        content=content,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency_ms,
-        cost_usd=float(cost_usd or 0.0),
-        confidence=confidence,
+    primary_identity: Optional[Dict[str, Any]] = None
+    if ui is not None:
+        primary_identity = {
+            "provider": ui.provider,
+            "provider_sub": ui.provider_sub,
+            "email": ui.email,
+            "display_name": ui.display_name,
+        }
+
+    return WhoAmIResponse(
+        user_id=str(user.id),
+        external_id=user.external_id,
+        display_name=user.display_name,
+        email=user.email,
+        primary_identity=primary_identity,
     )
 
 
-def build_consolidation_prompt(messages, base_results: List[RouterResultItem]) -> str:
-    user_prompt = _extract_prompt_from_messages(messages)
-    lines = [
-        "You are an ensemble model that consolidates multiple model outputs.",
-        "",
-        "Original user prompt:",
-        user_prompt,
-        "",
-        "Model answers:",
+@router.post("/v1/router/digest", response_model=DigestResponse)
+async def router_digest(req: DigestRequest) -> DigestResponse:
+    """
+    LLM-based intent classifier using Gemini.
+    """
+
+    # Import locally to keep startup clean
+    from app.providers.gemini_provider import call_gemini_api
+    import json
+
+    # Build a compact conversation transcript
+    convo_lines = []
+    for m in req.messages:
+        convo_lines.append(f"{m.role}: {m.content}")
+    convo_text = "\n".join(convo_lines)
+
+    # Clean multi-line classifier prompt
+    classifier_prompt = f"""
+You are an intent classifier for a developer chat UI.
+
+Read the conversation below and choose **exactly ONE** intent label from:
+
+  - bug_report
+  - explanation
+  - summary
+  - general
+
+Return strictly JSON **only**, in the following format:
+{{
+  "intent": "bug_report"
+}}
+
+Conversation:
+{convo_text}
+"""
+
+    # Wrap in a chat-format message
+    messages_for_gemini = [
+        {"role": "user", "content": classifier_prompt}
     ]
-    for r in base_results:
-        lines.append(
-            f"- Provider={r.provider}, model={r.model}, profile={r.profile}, "
-            f"cost={r.cost_usd}, latency={r.latency_ms}ms"
+
+    # Default if everything fails
+    intent = "general"
+
+    try:
+        content, tokens_in, tokens_out, model_used = await call_gemini_api(
+            messages_for_gemini,
+            model_hint="gemini-2.5-flash",
         )
-        lines.append(r.content)
-        lines.append("")
-    lines.append("Please produce a single consolidated answer.")
-    return "\n".join(lines)
+    except Exception:
+        return DigestResponse(intent=intent)
 
+    # Try to parse JSON object from model output
+    text = content.strip()
+    try:
+        # naive bracket extractor
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            block = text[start:end + 1]
+            data = json.loads(block)
+            candidate = str(data.get("intent", "")).lower()
+            if candidate in {"bug_report", "explanation", "summary", "general"}:
+                intent = candidate
+    except Exception:
+        pass
 
-# ============================================================
-#  /v1/router/chat
-# ============================================================
+    return DigestResponse(intent=intent)
+
 
 @router.post("/v1/router/chat", response_model=RouterChatResponse)
-async def router_chat(
-    req: RouterChatRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    if not req.providers:
-        raise HTTPException(status_code=400, detail="At least one provider required")
+async def router_chat(req: RouterChatRequest) -> Dict[str, Any]:
+    """
+    Phase 2+4 baseline (typed version):
+    - FastAPI surface: req: RouterChatRequest -> RouterChatResponse
+      (no Depends, no SQLAlchemy types in the signature)
+    - Inside:
+      * req is already validated by FastAPI/Pydantic
+      * Get DB session via get_db()
+      * Resolve current user:
+          - if req.debug_identity is provided, use that identity
+          - otherwise, use get_current_user(dev stub for now)
+      * Get or create session via get_or_create_session(...)
+      * Call call_providers(...)
+      * Return RouterChatResponse (typed), or fallback dict if something
+        goes wrong in the diagnostic schema-check path.
 
-    session = await get_or_create_session(db, user.id, req.session_id)
+    STEP1 additions (earlier):
+      * Log basic request info (session_id/profile/providers).
+      * Return extra metadata fields: status, session_id, user_id
+        in the fallback path.
 
-    rr = AiRouterRequest(
-        user_id=user.id,
-        session_id=session.id,
-        profile=req.profile,
+    STEP2 additions:
+      * Bubble up provider/model/strategy/estimated_cost_usd
+        from final_result to top-level for easier UI / debugging
+        in the fallback path.
+
+    STEP3 additions:
+      * Soft schema self-check using RouterChatResponse (diagnostic only,
+        never affects response; errors are just logged).
+
+    Phase 4 additions:
+      * Support dev-only identity override via req.debug_identity.
+    """
+
+    # STEP1: basic debug logging of the validated request
+    try:
+        providers_list = [p.value for p in req.providers]
+    except Exception:
+        providers_list = []
+    logger.info(
+        "router_chat: session_id=%s profile=%s providers=%s deepseek_mode=%s",
+        getattr(req, "session_id", None),
+        getattr(req, "profile", None),
+        providers_list,
+        getattr(getattr(req, "deepseek_mode", None), "value", None),
     )
-    db.add(rr)
-    await db.commit()
-    await db.refresh(rr)
 
-    # --- Base model calls ---
-    base_tasks = [
-        call_single_provider(
-            db,
-            user_id=user.id,
-            session_id=session.id,
-            router_request_id=rr.id,
-            provider=p,
-            model_hint=None,
-            profile=req.profile,
-            messages=req.messages,
+    # 1.5) Phase 4: optional debug_identity override
+    identity_override: Optional[UserIdentityInfo] = None
+    if getattr(req, "debug_identity", None):
+        try:
+            identity_override = UserIdentityInfo(**req.debug_identity)
+            logger.info(
+                "router_chat: using debug_identity provider=%s sub=%s email=%s",
+                identity_override.provider,
+                identity_override.provider_sub,
+                identity_override.email,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"debug_identity_validation_error: {exc!r}",
+            )
+
+    # 2) Manually get an AsyncSession from get_db()
+    db = None
+    try:
+        async for db_session in get_db():
+            db = db_session
+            break
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"db_error: {exc!r}")
+
+    if db is None:
+        raise HTTPException(status_code=500, detail="db_not_available")
+
+    # 3) Get current user
+    #    - If debug_identity override is present, use it to resolve the user
+    #    - Otherwise, fall back to existing dev stub in get_current_user()
+    try:
+        if identity_override is not None:
+            user = await get_or_create_user_from_identity(db=db, identity=identity_override)
+        else:
+            user = await get_current_user(db=db)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"get_current_user_error: {exc!r}")
+
+    # 4) Get or create session row in DB
+    try:
+        user_id = str(getattr(user, "id", ""))
+        session = await get_or_create_session(
+            db=db,
+            user_id=user_id,
+            session_external_id=req.session_id,
         )
-        for p in req.providers
-    ]
-    base_results = await asyncio.gather(*base_tasks)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"session_error: {exc!r}")
 
-    # --- No ensemble needed ---
-    if len(base_results) == 1 or not req.consolidate.enabled:
-        final_item = base_results[0]
-        return RouterChatResponse(
-            final=FinalResult(
-                content=final_item.content,
-                strategy="single_model",
-            ),
+    # 5) Call providers orchestrator
+    try:
+        final_result, base_results = await call_providers(
+            req=req,
+            db=db,
+            user=user,
+            session=session,
+        )
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"call_providers_error: {exc!r}")
+
+    # 6) Convert any Pydantic models to plain dicts for the fallback response
+    def to_dict(obj: Any) -> Any:
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj
+        if hasattr(obj, "model_dump"):  # Pydantic v2
+            return obj.model_dump()
+        if hasattr(obj, "dict"):        # Pydantic v1
+            return obj.dict()
+        return obj
+
+    final_dict = to_dict(final_result)
+    provider = final_dict.get("provider")
+    model = final_dict.get("model")
+    strategy = final_dict.get("strategy")
+    estimated_cost_usd = final_dict.get("estimated_cost_usd")
+
+    # STEP3: soft schema self-check (diagnostic only)
+    typed_response: Optional[RouterChatResponse] = None
+
+    try:
+        # Build the typed response from the *original* objects
+        typed_response = RouterChatResponse(
+            final=final_result,
             results=base_results,
         )
 
-    # --- Ensemble ---
-    consolidation_text = build_consolidation_prompt(req.messages, base_results)
+        print(
+            "[router_chat] RouterChatResponse schema check OK:",
+            type(typed_response.final).__name__ if typed_response.final else None,
+            "results_count=",
+            len(typed_response.results or []),
+        )
 
-    ensemble_result = await call_single_provider(
-        db,
-        user_id=user.id,
-        session_id=session.id,
-        router_request_id=rr.id,
-        provider=req.consolidate.provider,
-        model_hint=req.consolidate.model,
-        profile="ensemble",
-        messages=[{"role": "user", "content": consolidation_text}],
-    )
+    except Exception as exc:
+        print("[router_chat] RouterChatResponse schema check FAILED:", repr(exc))
+        # We won't fail the request; we’ll just fall back to the manual dict.
 
-    return RouterChatResponse(
-        final=FinalResult(
-            content=ensemble_result.content,
-            strategy="ensemble",
-        ),
-        results=base_results,
-    )
+    # STEP4: Return JSON
+    # Prefer the typed RouterChatResponse payload if it was built successfully;
+    # otherwise, fall back to the previous manual structure.
+    if typed_response is not None:
+        # Let FastAPI/pydantic handle serialization
+        return typed_response
+
+    # Fallback: old behavior (what you currently have working)
+    return {
+        "final": to_dict(final_result),
+        "results": [to_dict(r) for r in base_results],
+        "meta": {
+            "provider": provider,
+            "model": model,
+            "strategy": strategy,
+            "estimated_cost_usd": estimated_cost_usd,
+            "user_id": str(getattr(user, "id", "")),
+            "session_id": getattr(req, "session_id", None),
+        },
+    }
