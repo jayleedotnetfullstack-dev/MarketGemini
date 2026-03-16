@@ -18,7 +18,11 @@ def extract_prompt(messages):
     return str(last)
 
 
-async def call_gemini_api(messages, model_hint=None):
+async def call_gemini_api(
+    messages,
+    model_hint=None,
+    temperature: float = 0.4,
+):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set")
 
@@ -31,7 +35,15 @@ async def call_gemini_api(messages, model_hint=None):
     )
 
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}]
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": temperature,
+        },
     }
 
     max_attempts = 5

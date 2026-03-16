@@ -115,6 +115,11 @@ class AiInvocation(Base):
     cost_usd = Column(Numeric(10, 6))
     latency_ms = Column(Integer)
 
+    # NEW: temperature tracking
+    resolved_temperature = Column(Numeric(3, 2))
+    user_temperature = Column(Numeric(3, 2), nullable=True)
+    temperature_policy = Column(String(20))
+
     success = Column(Boolean, nullable=False)
     error_code = Column(String)
 

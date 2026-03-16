@@ -1,7 +1,6 @@
 import time
 import asyncio
-import os
-from typing import Tuple, List
+from typing import Any, Dict, List, Tuple, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +12,8 @@ from app.schemas import (
     DeepseekMode,
     DeepseekRoutingInfo,
 )
+
+from app.schemas.core import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
 
 from app.services.logging_service import log_invocation
 from app.providers.gemini_provider import call_gemini_api
@@ -28,7 +29,12 @@ from app.routing.deepseek_classifier import (
 from app.routing.deepseek_pricing import estimate_deepseek_cost
 from app.db.models import AiRouterRequest
 
-from typing import Any, List, Dict
+from app.config.providers_loader import get_provider_version
+import asyncio
+
+async def call_providers(tasks):
+    results = await asyncio.gather(*tasks)
+    return results
 
 def _normalize_messages_for_llm(messages: List[Any]) -> List[Dict[str, str]]:
     """
@@ -70,7 +76,7 @@ def _normalize_messages_for_llm(messages: List[Any]) -> List[Dict[str, str]]:
     return normalized
 
 # ============================================================
-#  Single provider call
+#  Single provider call (CONFIG-DRIVEN)
 # ============================================================
 
 async def call_single(
@@ -83,10 +89,14 @@ async def call_single(
     model_hint: str | None,
     profile: str,
     messages,
+    temperature: Optional[float],
 ) -> Tuple[RouterResultItem, DeepseekRoutingInfo | None]:
+
     start = time.perf_counter()
 
+    # -------------------------------
     # Defaults
+    # -------------------------------
     tokens_in = 0
     tokens_out = 0
     cost_usd = 0.0
@@ -97,72 +107,115 @@ async def call_single(
     error_code = None
     deepseek_routing_info: DeepseekRoutingInfo | None = None
 
+    if temperature is None:
+        temperature = 0.4
+
     try:
-        # ---------------------------------------------------------
+        # =====================================================
         # GEMINI
-        # ---------------------------------------------------------
+        # =====================================================
         if provider == Provider.gemini:
+
+            # model_hint is the VERSION id (e.g. "2.0-flash")
+            version_cfg = get_provider_version("gemini", model_hint)
+
+            model_id = version_cfg["id"]
+            base_url = version_cfg["base_url"]
+
             content, tokens_in, tokens_out, model_used = await call_gemini_api(
-                messages, model_hint
+                messages,
+                model_hint=model_id,
+                temperature=temperature,
             )
-            # TODO: plug in real Gemini pricing if/when you want
+
             cost_usd = 0.0
             confidence = 0.88
 
-        # ---------------------------------------------------------
-        # DEEPSEEK (AUTO + MANUAL)
-        # ---------------------------------------------------------
+
+        # =====================================================
+        # DEEPSEEK
+        # =====================================================
         elif provider == Provider.deepseek:
-            last_prompt = extract_prompt(messages)
 
-            # Classifier recommendation
+            last_prompt = extract_prompt(messages) or ""
+            if not last_prompt.strip():
+                raise ValueError("DeepSeek prompt is empty")
+
+            # --------------------------------------------
+            # 1. Classifier recommendation
+            # --------------------------------------------
             auto_model_enum, conf_score, reason = classify_deepseek_model(last_prompt)
-            auto_model_id = auto_model_enum.value  # e.g. "deepseek-chat"
+            auto_version_id = auto_model_enum.value  # e.g. "chat" | "r1"
 
-            # model_hint carries "auto" | "chat" | "v3" | "r1" from the UI
-            # If it's missing/invalid, default to DeepseekMode.auto.
-            selected_mode_str = model_hint or DeepseekMode.auto.value
-            try:
-                requested_mode = DeepseekMode(selected_mode_str)
-            except ValueError:
-                requested_mode = DeepseekMode.auto
+            # --------------------------------------------
+            # 2. Requested version from UI
+            # --------------------------------------------
+            selected_version = model_hint or DeepseekMode.auto.value
 
-            # Resolve actual DeepSeek model ID to call
-            if requested_mode == DeepseekMode.auto:
-                resolved_id = auto_model_id
-            elif requested_mode == DeepseekMode.chat:
-                resolved_id = DeepseekResolvedModel.chat.value
-            elif requested_mode == DeepseekMode.v3:
-                resolved_id = DeepseekResolvedModel.v3.value
-            elif requested_mode == DeepseekMode.r1:
-                resolved_id = DeepseekResolvedModel.r1.value
+            if selected_version == DeepseekMode.auto.value:
+                version_id = auto_version_id
             else:
-                resolved_id = auto_model_id
+                version_id = selected_version
 
-            # Actual DeepSeek API call
+            # --------------------------------------------
+            # 3. Resolve from providers.json
+            # --------------------------------------------
+            version_cfg = get_provider_version("deepseek", version_id)
+
+            model_id = version_cfg["id"]
+            base_url = version_cfg["base_url"]
+
+            print("DEBUG DeepSeek version:", version_id)
+            print("DEBUG DeepSeek model:", model_id)
+            print("DEBUG DeepSeek base_url:", base_url)
+
+            # --------------------------------------------
+            # 4. Strict message format
+            # --------------------------------------------
+            messages_for_provider = [
+                {"role": "user", "content": last_prompt.strip()}
+            ]
+
+            # --------------------------------------------
+            # 5. Call DeepSeek API
+            # --------------------------------------------
             client = DeepseekProvider(
-                api_key=os.getenv("DEEPSEEK_API_KEY"),
-                model=resolved_id,
+                api_key=DEEPSEEK_API_KEY,
+                model=model_id,
+                base_url=base_url,
             )
-            content, tokens_in, tokens_out = await client.invoke(messages)
 
-            cost_usd = estimate_deepseek_cost(resolved_id, tokens_in, tokens_out)
-            model_used = resolved_id
+            content, tokens_in, tokens_out = await client.invoke(
+                messages_for_provider,
+                temperature=temperature,
+            )
+
+            cost_usd = estimate_deepseek_cost(
+                model_id,
+                tokens_in,
+                tokens_out,
+            )
+
+            model_used = model_id
             confidence = conf_score
 
-            # Construct routing info for UI transparency
+            # --------------------------------------------
+            # 6. Routing transparency
+            # --------------------------------------------
             deepseek_routing_info = DeepseekRoutingInfo(
-                requested_mode=requested_mode,
-                resolved_model=resolved_id,
-                auto_recommended_model=auto_model_id,
+                requested_mode=DeepseekMode(selected_version)
+                if selected_version in DeepseekMode._value2member_map_
+                else DeepseekMode.auto,
+                resolved_model=model_id,
+                auto_recommended_model=auto_version_id,
                 confidence_score=conf_score,
                 confidence_label=confidence_label(conf_score),
                 confidence_message=reason,
             )
 
-        # ---------------------------------------------------------
-        # OTHER PROVIDERS (NOT IMPLEMENTED)
-        # ---------------------------------------------------------
+        # =====================================================
+        # OTHER PROVIDERS
+        # =====================================================
         else:
             content = f"[DEMO] Provider {provider.value} not implemented"
 
@@ -172,10 +225,14 @@ async def call_single(
         content = f"Error: {ex}"
         confidence = 0.0
 
+    # =====================================================
     # Latency
+    # =====================================================
     latency_ms = int((time.perf_counter() - start) * 1000)
 
+    # =====================================================
     # Persist invocation log
+    # =====================================================
     await log_invocation(
         db,
         user_id=user.id,
@@ -193,6 +250,9 @@ async def call_single(
         error_code=error_code,
     )
 
+    # =====================================================
+    # Return result
+    # =====================================================
     return (
         RouterResultItem(
             provider=provider,
@@ -209,97 +269,72 @@ async def call_single(
     )
 
 # ============================================================
-#  call_providers: orchestrates base calls + ensemble
+#  Call multiple providers / versions (VERSION-AWARE)
 # ============================================================
 
 async def call_providers(
-    req: RouterChatRequest,
     db: AsyncSession,
+    *,
     user,
     session,
-):
-    # Record the router-level request
-    rr = AiRouterRequest(
-        user_id=user.id,
-        session_id=session.id,
-        profile=req.profile,
-    )
-    db.add(rr)
-    await db.commit()
-    await db.refresh(rr)
+    rr: AiRouterRequest,
+    provider_selections: list,   # [{id: "deepseek", versions: [...]}, ...]
+    profile: str,
+    messages,
+    temperature: Optional[float],
+) -> Tuple[List[RouterResultItem], DeepseekRoutingInfo | None]:
 
-    # --- SEQUENTIAL CALLS (no asyncio.gather) ---
-    base_results: List[RouterResultItem] = []
-    deepseek_meta: DeepseekRoutingInfo | None = None
+    tasks = []
+    deepseek_routing_info: DeepseekRoutingInfo | None = None
 
-    for p in req.providers:
-        # For DeepSeek, prefer explicit model_hint_map; fallback to deepseek_mode
-        if p == Provider.deepseek:
-            hint = req.model_hint_map.get(p.value) or req.deepseek_mode.value
-            # normalize messages only for DeepSeek so JSON serialization works
-            messages_for_provider = _normalize_messages_for_llm(req.messages)
-        else:
-            hint = req.model_hint_map.get(p.value)
-            # keep existing behavior for non-DeepSeek providers
-            messages_for_provider = req.messages
+    # --------------------------------------------------------
+    # Expand provider + versions
+    # --------------------------------------------------------
+    for selection in provider_selections:
 
-        item, meta = await call_single(
-            db=db,
-            user=user,
-            session=session,
-            rr=rr,
-            provider=p,
-            model_hint=hint,
-            profile=req.profile,
-            messages=messages_for_provider,
-        )
+        provider_id = selection.get("id")
+        versions = selection.get("versions") or []
 
-        base_results.append(item)
-        if meta:
-            deepseek_meta = meta
+        try:
+            provider_enum = Provider(provider_id)
+        except ValueError:
+            print(f"Unknown provider: {provider_id}")
+            continue
 
-    # No ensemble: single provider or consolidation disabled
-    if len(base_results) == 1 or not req.consolidate.enabled:
-        final_item = base_results[0]
-        return (
-            FinalResult(
-                content=final_item.content,
-                strategy="single_model",
-                provider=final_item.provider,
-                model=final_item.model,
-                estimated_cost_usd=final_item.cost_usd,
-                deepseek_routing=deepseek_meta,
-            ),
-            base_results,
-        )
+        # -----------------------------------------------
+        # If no versions provided, fallback to default
+        # -----------------------------------------------
+        if not versions:
+            versions = [None]
 
-    # Ensemble logic (Gemini as consolidator)
-    from app.services.ensemble_service import build_and_call_ensemble
+        for version in versions:
 
-    final_result = await build_and_call_ensemble(
-        req=req,
-        db=db,
-        user=user,
-        session=session,
-        router_request=rr,
-        base_results=base_results,
-    )
+            tasks.append(
+                call_single(
+                    db=db,
+                    user=user,
+                    session=session,
+                    rr=rr,
+                    provider=provider_enum,
+                    model_hint=version,   # version ID passed here
+                    profile=profile,
+                    messages=messages,
+                    temperature=temperature,
+                )
+            )
 
-    # Attach DeepSeek routing info (if any) to the final result as well
-    final_result.deepseek_routing = deepseek_meta
+    # --------------------------------------------------------
+    # Execute in parallel
+    # --------------------------------------------------------
+    results = await asyncio.gather(*tasks)
 
-    final_result = await build_and_call_ensemble(
-        req=req,
-        db=db,
-        user=user,
-        session=session,
-        router_request=rr,
-        base_results=base_results,
-    )
+    router_items: List[RouterResultItem] = []
 
-    final_result.deepseek_routing = deepseek_meta
+    for result_item, ds_info in results:
+        router_items.append(result_item)
 
-    # ⬇️ Commit ENTIRE transaction (router request + invocations)
-    await db.commit()
+        # Only keep first DeepSeek routing info (optional)
+        if ds_info and deepseek_routing_info is None:
+            deepseek_routing_info = ds_info
 
-    return final_result, base_results
+    return router_items, deepseek_routing_info

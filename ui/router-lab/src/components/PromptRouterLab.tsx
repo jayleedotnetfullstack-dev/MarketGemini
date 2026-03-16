@@ -16,7 +16,9 @@ import DigestSummary from "./DigestSummary";
 import ChatResponse from "./ChatResponse";
 import DebugPanel from "./DebugPanel";
 
-const ROUTER_BASE_URL = "http://localhost:8000";
+// deepseek is configured to 8001
+// const ROUTER_BASE_URL = "http://localhost:8000";
+const ROUTER_BASE_URL = "http://localhost:8001";
 
 const PromptRouterLab: React.FC = () => {
   const [prompt, setPrompt] = useState("");
@@ -29,6 +31,9 @@ const PromptRouterLab: React.FC = () => {
   const [loadingDigest, setLoadingDigest] = useState(false);
   const [loadingChat, setLoadingChat] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Optional low-confidence guidance
+  const [userGuidance, setUserGuidance] = useState<string | null>(null);
 
   // Toggle: show individual model outputs vs just final consolidated result
   const [showProviderDetails, setShowProviderDetails] = useState<boolean>(false);
@@ -48,6 +53,11 @@ const PromptRouterLab: React.FC = () => {
     }
   );
 
+  const [digestResult, setDigestResult] = useState<DigestResult | null>(null);
+
+  // --- Option B: Temperature ---
+  const [uiTemperature, setUiTemperature] = useState<number | null>(null);
+
   // --- Handlers ---
 
   const handleAnalyze = async () => {
@@ -56,6 +66,7 @@ const PromptRouterLab: React.FC = () => {
     setDigestRaw(null);
     setRouterResponse(null);
     setChatRaw(null);
+    setUserGuidance(null);
 
     if (!prompt.trim()) {
       setError("Please enter a prompt first.");
@@ -65,17 +76,18 @@ const PromptRouterLab: React.FC = () => {
     setLoadingDigest(true);
     try {
       const body = {
-        user_id: "router-lab",
-        session_id: "router-lab-session-1",
+        user_id: "c8c919b5-6e6f-4c9d-ae22-007065be33c2",
+        session_id: "c8c919b5-6e6f-4c9d-ae22-007065be33c2",
         messages: [
           {
             role: "user",
             content: prompt,
           },
         ],
+        temperature: uiTemperature ?? null, // <-- Option B
       };
 
-      const resp = await fetch(`${ROUTER_BASE_URL}/v1/digest`, {
+      const resp = await fetch(`${ROUTER_BASE_URL}/v1/router/digest`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -91,6 +103,8 @@ const PromptRouterLab: React.FC = () => {
         return;
       }
 
+      setDigestResult(data);  
+
       const profile: ProfileId = (data.profile as ProfileId) ?? "summary";
 
       const parsed: DigestResult = {
@@ -100,6 +114,13 @@ const PromptRouterLab: React.FC = () => {
         cleaned_prompt: data.cleaned_prompt ?? prompt,
         suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
       };
+
+      // --- Low-confidence guidance ---
+      if (parsed.confidence < 0.3) {
+        setUserGuidance(
+          "Your prompt may be too broad. Try adding specifics."
+        );
+      }
 
       setDigest(parsed);
     } catch (e: any) {
@@ -134,9 +155,8 @@ const PromptRouterLab: React.FC = () => {
 
     try {
       const body = {
-        // user_id will eventually come from auth; for now demo
-        user_id: "router-lab",
-        session_id: "router-lab-session-1",
+        user_id: "c8c919b5-6e6f-4c9d-ae22-007065be33c2",
+        session_id: "c8c919b5-6e6f-4c9d-ae22-007065be33c2",
         profile,
         providers, // multiple providers supported
         messages: [
@@ -145,6 +165,7 @@ const PromptRouterLab: React.FC = () => {
             content: finalPrompt,
           },
         ],
+        temperature: uiTemperature ?? null, // <-- Option B
         consolidate: {
           enabled: consolidateConfig.enabled,
           provider: consolidateConfig.provider,
@@ -168,7 +189,6 @@ const PromptRouterLab: React.FC = () => {
         return;
       }
 
-      // trust backend to match RouterChatResponse shape
       setRouterResponse(data as RouterChatResponse);
     } catch (e: any) {
       console.error("Chat error:", e);
@@ -356,7 +376,44 @@ const PromptRouterLab: React.FC = () => {
               >
                 {loadingChat ? "Running..." : "Run with cleaned prompt"}
               </button>
+
+              {/* Option B: temperature input */}
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                max="1"
+                placeholder="Temp"
+                value={uiTemperature ?? ""}
+                onChange={(e) =>
+                  setUiTemperature(
+                    e.target.value === "" ? null : Number(e.target.value)
+                  )
+                }
+                style={{
+                  width: "60px",
+                  padding: "4px 6px",
+                  borderRadius: "6px",
+                  border: "1px solid #374151",
+                  backgroundColor: "#020617",
+                  color: "#e5e7eb",
+                  fontSize: "13px",
+                }}
+              />
             </div>
+
+            {/* Low-confidence guidance */}
+            {userGuidance && (
+              <div
+                style={{
+                  marginTop: "6px",
+                  fontSize: "13px",
+                  color: "#facc15",
+                }}
+              >
+                ⚠️ {userGuidance}
+              </div>
+            )}
           </div>
 
           {/* Error */}

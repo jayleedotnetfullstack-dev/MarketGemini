@@ -3,7 +3,12 @@ from enum import Enum
 from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel
+from app.schemas.digest import DigestResponse
 
+import os
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").strip()
 
 # ============================================================
 # Provider Enumeration
@@ -12,12 +17,13 @@ from pydantic import BaseModel
 class Provider(str, Enum):
     gemini = "gemini"
     openai = "openai"
+    llama = "llama"
     deepseek = "deepseek"
     # extend later: anthropic, llama, perplexity, etc.
 
 
 # User-selected profile category (not model)
-ProfileId = Literal["factual", "summary", "creative", "code", "ensemble"]
+ProfileId = Literal["factual", "summary", "creative", "code", "ensemble", "general"]
 
 
 # ============================================================
@@ -73,6 +79,7 @@ class RouterChatRequest(BaseModel):
     providers: List[Provider]
     messages: List[Message]
     consolidate: ConsolidateConfig
+    id: str = None  # optional, defaults to None
 
     # dict mapping provider → model hint
     #   e.g. { "deepseek": "v3", "gemini": "gemini-pro" }
@@ -152,8 +159,3 @@ class DigestRequest(BaseModel):
     user_id: str
     session_id: str
     messages: List[DigestMessage]
-
-
-class DigestResponse(BaseModel):
-    intent: str
-    # add more fields later if needed

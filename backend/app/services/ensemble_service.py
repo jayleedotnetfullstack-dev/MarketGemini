@@ -63,6 +63,7 @@ async def _call_ensemble_provider(
     profile: str,
     consolidation_text: str,
     router_request_id,
+    temperature: float = 0.4,  # default if not specified
 ) -> RouterResultItem:
     """
     A lightweight, provider-aware call used ONLY for ensemble consolidation.
@@ -83,7 +84,7 @@ async def _call_ensemble_provider(
     try:
         if provider == Provider.gemini:
             content, tokens_in, tokens_out, model_used = await call_gemini_api(
-                messages, model_hint
+                messages, model_hint,temperature=temperature,
             )
             # TODO: add actual Gemini pricing if desired
             cost_usd = 0.0

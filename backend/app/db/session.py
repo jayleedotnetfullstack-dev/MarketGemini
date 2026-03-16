@@ -7,6 +7,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
 
 # ------------------------------------------------------------
 # Load environment variables
@@ -46,17 +49,10 @@ class Base(DeclarativeBase):
     pass
 
 
-# ------------------------------------------------------------
-# FastAPI DB dependency
-# ------------------------------------------------------------
-async def get_db() -> AsyncSession:
-    """
-    Provides an async SQLAlchemy session for FastAPI.
-    Ensures proper cleanup after request.
-    """
+@asynccontextmanager
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
         yield session
-
 
 # ------------------------------------------------------------
 # Optional: startup connectivity check

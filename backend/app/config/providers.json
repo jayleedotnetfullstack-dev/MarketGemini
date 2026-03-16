@@ -1,0 +1,42 @@
+{
+  "providers": [
+    {
+        "id": "gemini",
+        "name": "Gemini LLM",
+        "enabled": true,
+        "versions": [
+            {
+            "id": "2.0-flash",
+            "name": "Gemini 2.0 Flash",
+            "enabled": true,
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            },
+            {
+            "id": "2.5-mini",
+            "name": "Gemini 2.5 Mini",
+            "enabled": true,
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            }
+        ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "enabled": true,
+      "versions": [
+        {
+          "id": "chat",
+          "name": "Chat",
+          "enabled": true,
+          "base_url": "https://api.deepseek.com/v1/chat"
+        },
+        {
+          "id": "v3",
+          "name": "V3",
+          "enabled": true,
+          "base_url": "https://api.deepseek.com/v1/v3"
+        }
+      ]
+    }
+  ]
+}
